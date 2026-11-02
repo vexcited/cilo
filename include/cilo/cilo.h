@@ -101,12 +101,19 @@ typedef struct cilo_arena {
 
 [[gnu::cold, gnu::noinline, gnu::returns_nonnull]] void *cilo__arena_grow(cilo_arena *a, size_t size, size_t align);
 
+// a field read on its own, never paired with its neighbour. the previous allocation just stored `cur`, and a
+// load pair reading it with `end` cannot take it from the store buffer: on an apple m4 it waits for the store
+// to retire, 2.5 ns per allocation against 1.3. a relaxed atomic load is a plain load that compilers never
+// pair, on every target.
+#define CILO__LOAD_ALONE(field) __atomic_load_n(&(field), __ATOMIC_RELAXED)
+
 [[gnu::always_inline, gnu::malloc, gnu::returns_nonnull, gnu::alloc_size(2), gnu::alloc_align(3)]]
 static inline void *cilo_arena_alloc(cilo_arena *a, size_t size, size_t align) {
   if (CILO_ASAN && align < 8) align = 8;
+  uintptr_t end = (uintptr_t)CILO__LOAD_ALONE(a->end);
   uintptr_t cur = (uintptr_t)a->cur;
   size_t pad = (size_t)(-cur & (align - 1));
-  size_t avail = (size_t)((uintptr_t)a->end - cur);
+  size_t avail = (size_t)(end - cur);
   // strict so an empty arena, where cur and end are null, always misses. no sum can overflow.
   if (CILO_LIKELY(pad + CILO__REDZONE < avail && size <= avail - pad - CILO__REDZONE)) {
     char *p = a->cur + pad;
@@ -500,12 +507,13 @@ static inline void *cilo__init(void *dst, const void *src, size_t size) { return
 
 // appends an item initialized like a compound literal and points at it: CILO_PUSH(&arena, &users, .id = 1).
 // the pointer is assigned to a compound literal, and an unused assignment does not warn like a bare pointer.
-// arrays at the top of an arena grow in place.
+// arrays at the top of an arena grow in place. `items` and `cap` are read alone, so `len`, which the last push
+// stored, is never loaded in a pair.
 #define CILO_PUSH(a, v, ...)                                                                                     \
-  (CILO_RESERVE(a, v, 1), (v)->items[(v)->len] = (typeof(*(v)->items)){__VA_ARGS__},                            \
+  (CILO_RESERVE(a, v, 1), CILO__LOAD_ALONE((v)->items)[(v)->len] = (typeof(*(v)->items)){__VA_ARGS__},          \
    (typeof((v)->items)){} = &(v)->items[(v)->len++])
 #define CILO_RESERVE(a, v, n)                                                                                    \
-  ((v)->len + (n) <= (v)->cap                                                                                    \
+  ((v)->len + (n) <= CILO__LOAD_ALONE((v)->cap)                                                                  \
        ? (void)0                                                                                                 \
        : (void)((v)->items = cilo__vec_grow(CILO_OF(a), (v)->items, &(v)->cap, (v)->len, (v)->len + (n),         \
                                             sizeof *(v)->items, alignof(typeof(*(v)->items)))))

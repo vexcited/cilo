@@ -32,6 +32,12 @@ static volatile uint64_t sink;
 
 static Node *nodes[N];
 
+// one allocation per call, as code that builds its values through small helpers does.
+[[gnu::noinline]] static Node *make_node(cilo_arena *a, uint64_t value) { return new(a, Node, .value = value); }
+[[gnu::noinline]] static char *copy_name(cilo_arena *a, const char *name) { return cilo_strndup(CILO_OF(a), name, 16); }
+typedef vec(uint32_t) U32s;
+[[gnu::noinline]] static void push_one(cilo_arena *a, U32s *v, uint32_t x) { push(a, v, x); }
+
 int main(void) {
   BENCH("malloc + free, 16 B nodes", N, {
     for (int i = 0; i < N; i++) {
@@ -55,6 +61,16 @@ int main(void) {
   BENCH("same, through cilo_allocator *", N, {
     for (int i = 0; i < N; i++) nodes[i] = new(any, Node, .value = (uint64_t)i);
     for (int i = 0; i < N; i++) sink += nodes[i]->value;
+    cilo_arena_reset(&arena);
+  });
+
+  BENCH("arena new, one call each", N, {
+    for (int i = 0; i < N; i++) nodes[i] = make_node(&arena, (uint64_t)i);
+    cilo_arena_reset(&arena);
+  });
+
+  BENCH("arena strndup, 16 B, one call each", N, {
+    for (int i = 0; i < N; i++) sink += (uint8_t)copy_name(&arena, "font-family-name")[i & 15];
     cilo_arena_reset(&arena);
   });
 
@@ -100,6 +116,13 @@ int main(void) {
   BENCH("arena vec push 10M u32", 10 * N, {
     vec(uint32_t) xs = {};
     for (uint32_t i = 0; i < 10 * N; i++) push(&arena, &xs, i);
+    sink += xs.items[xs.len - 1];
+    cilo_arena_reset(&arena);
+  });
+
+  BENCH("arena vec push, one call each", 10 * N, {
+    U32s xs = {};
+    for (uint32_t i = 0; i < 10 * N; i++) push_one(&arena, &xs, i);
     sink += xs.items[xs.len - 1];
     cilo_arena_reset(&arena);
   });
