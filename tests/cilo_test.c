@@ -62,6 +62,17 @@ static void rewinds_and_zeroing(void) {
   cilo_arena_reset(&arena);
   for (int i = 0; i < 64; i++) (void)new_array(&arena, char, 32 << 10);
   CHECK(cilo_arena_stats(&arena).reserved == before.reserved);
+
+  // every chunk keeps its own high water mark through a reset, wherever the system mapped it.
+  cilo_arena_reset(&arena);
+  for (int i = 0; i < 64; i++) memset(new_array(&arena, char, 16 << 10), 0xff, 16 << 10);
+  cilo_arena_reset(&arena);
+  size_t stale = 0;
+  for (int i = 0; i < 64; i++) {
+    char *p = new_array(&arena, char, 16 << 10);
+    for (int j = 0; j < 16 << 10; j++) stale += p[j] != 0;
+  }
+  CHECK(stale == 0);
   cilo_arena_drop(&arena);
   CHECK(arena.chunk == nullptr && arena.spare == nullptr);
 }

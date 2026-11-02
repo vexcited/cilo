@@ -138,9 +138,10 @@ void *cilo__arena_grow(cilo_arena *a, size_t size, size_t align) {
 
 void cilo__rewind_slow(cilo_mark m) {
   cilo_arena *a = m.arena;
+  // only the current chunk has its high water mark in the arena, the ones below saved theirs when it was left.
+  if (a->chunk && a->chunk != m.chunk) chunk_leave(a);
   while (a->chunk && a->chunk != m.chunk) {
     cilo__chunk *c = a->chunk;
-    chunk_leave(a);
     a->chunk = c->prev;
     if (c->kind == CILO__BORROWED) continue;
     CILO__POISON(chunk_data(c), (size_t)(chunk_end(c) - chunk_data(c)));
