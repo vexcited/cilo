@@ -1,0 +1,48 @@
+cmake_minimum_required(VERSION 3.29)
+project(cilo VERSION 0.1.0 LANGUAGES C)
+
+set(CMAKE_C_STANDARD 23)
+set(CMAKE_C_STANDARD_REQUIRED ON)
+set(CMAKE_C_EXTENSIONS OFF)
+set(CMAKE_EXPORT_COMPILE_COMMANDS ${PROJECT_IS_TOP_LEVEL})
+
+option(CILO_BUILD_TESTS "build the cilo tests and benchmarks" ${PROJECT_IS_TOP_LEVEL})
+
+add_library(cilo STATIC src/cilo.c src/heap.c)
+find_package(Threads REQUIRED)
+target_link_libraries(cilo PUBLIC Threads::Threads)
+add_library(cilo::cilo ALIAS cilo)
+target_include_directories(cilo PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include> $<INSTALL_INTERFACE:include>)
+target_compile_options(cilo PRIVATE -Wall -Wextra -Wpedantic)
+
+# apple clang's machine outliner turns the inlined fast paths of cilo back into calls inside hot loops.
+option(CILO_NO_OUTLINE "build cilo and its users with -mno-outline where supported" ON)
+include(CheckCCompilerFlag)
+check_c_compiler_flag(-mno-outline CILO_HAS_NO_OUTLINE)
+if(CILO_NO_OUTLINE AND CILO_HAS_NO_OUTLINE)
+  target_compile_options(cilo PUBLIC -mno-outline)
+endif()
+set_target_properties(cilo PROPERTIES POSITION_INDEPENDENT_CODE ON)
+
+if(CILO_BUILD_TESTS)
+  enable_testing()
+  foreach(name tests/cilo_test examples/tour)
+    get_filename_component(target ${name} NAME)
+    add_executable(${target} ${name}.c)
+    target_link_libraries(${target} PRIVATE cilo)
+    target_compile_options(${target} PRIVATE -Wall -Wextra -Wpedantic)
+    add_test(NAME ${target} COMMAND ${target})
+  endforeach()
+  add_executable(cilo_bench bench/bench.c)
+  target_link_libraries(cilo_bench PRIVATE cilo)
+  target_compile_options(cilo_bench PRIVATE -O2 -Wall -Wextra -Wpedantic)
+endif()
+
+include(GNUInstallDirs)
+include(CMakePackageConfigHelpers)
+install(TARGETS cilo EXPORT cilo-targets)
+install(DIRECTORY include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+install(EXPORT cilo-targets NAMESPACE cilo:: DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/cilo)
+configure_package_config_file(cmake/cilo-config.cmake.in ${CMAKE_CURRENT_BINARY_DIR}/cilo-config.cmake
+  INSTALL_DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/cilo)
+install(FILES ${CMAKE_CURRENT_BINARY_DIR}/cilo-config.cmake DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/cilo)
