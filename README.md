@@ -118,8 +118,16 @@ instead of in the blocks, which avoids that. Churn on Linux is within 2% of rpma
 - **Devirtualized interface.** Libraries take a `cilo_allocator *`, a pointer to a vtable pointer embedded first in
   the allocator's state. An arena's vtable pointer is null, so the generic path recognizes arenas with one
   compare and inlines them too. A zeroed arena is still valid.
-- **Free zeroing.** Chunks come straight from `mmap`, already zero. Each chunk remembers how far it was ever used,
-  so `new_array` only clears memory that was handed out before.
+- **Unpaired loads.** The fast path reads `end` with a load of its own. Loading `cur` and `end` with one `ldp`, which
+  clang and gcc did on arm64, makes each allocation wait for the store of `cur` by the previous one to retire,
+  because a load pair half covered by a pending store cannot take its value from the store buffer. On an M4 that
+  is 2.65 ns per allocation against 1.31. `push` reads `items` and `cap` alone for the same reason, so `len` is
+  never paired. x86_64 has no load pairs and compiles to the same two loads as before.
+- **Small chunks from the heap.** A zeroed arena starts on a 4 KiB chunk from cilo's heap and doubles. From 64 KiB
+  on, chunks are zeroed pages mapped from the system. Thousands of small arenas never make a system call and only
+  hold what they use.
+- **Free zeroing.** Mapped chunks are already zero. Each chunk remembers how far it was ever used, so `new_array`
+  only clears memory that was handed out before.
 - **No syscalls in steady state.** Rewinds and resets keep chunks as spares for the next allocations.
 - **Stack first.** `cilo_arena a = arena_on(buf);` starts on a local array and spills once full. `arena_fixed(buf)`
   never spills.
@@ -127,12 +135,44 @@ instead of in the blocks, which avoids that. Churn on Linux is within 2% of rpma
   copies, and freeing the last allocation gives it back.
 - **One pass formatting.** `aprintf` formats straight into the arena's free space and only commits what it wrote.
 
-| arenas and pools, `bench/bench.c` | libc       | cilo       |
-| --------------------------------- | ---------- | ---------- |
-| 1M small nodes, allocate then free all | 11.1 ns/op | 3.2 ns/op |
-| churn with 64 live nodes, pool    | 10.8 ns/op | 1.1 ns/op  |
-| push 10M u32                      | 0.43 ns/op | 0.35 ns/op |
-| format a short string             | 45.8 ns/op | 33.7 ns/op |
+`bench/bench.c`, `-O2`, the best of 20 rounds, macOS 27 on an Apple M4 Pro. "before" is the previous release,
+with paired loads and every chunk mapped.
+
+| arenas and pools                          | libc       | cilo before | cilo       |
+| ----------------------------------------- | ---------- | ----------- | ---------- |
+| 1M 16 B nodes, allocate then free all     | 11.6 ns/op | 3.56 ns/op  | 2.68 ns/op |
+| the same through a `cilo_allocator *`     |            | 3.41 ns/op  | 2.38 ns/op |
+| 1M 16 B nodes, one call each              |            | 2.65 ns/op  | 1.31 ns/op |
+| 1M 16 B strings, one call each            |            | 1.89 ns/op  | 1.08 ns/op |
+| churn with 64 live nodes, pool            | 11.0 ns/op | 1.34 ns/op  | 1.24 ns/op |
+| push 10M u32                              | 0.43 ns/op | 0.37 ns/op  | 0.45 ns/op |
+| push 10M u32, one call each               |            | 1.92 ns/op  | 0.94 ns/op |
+| format a short string                     | 47.0 ns/op | 30.8 ns/op  | 31.6 ns/op |
+| a small arena: 8 nodes, a name, dropped   |            | 1522 ns     | 14.0 ns    |
+| a frame arena: 32 KiB, dropped            |            | 2832 ns     | 372 ns     |
+| 20k live arenas of 16 nodes each          |            | 314 MiB     | 82 MiB     |
+
+The pool row moves between 0.91 and 1.36 ns from run to run in both builds, the usual value is given. One row is
+slower. A loop pushing into one vector keeps `len` in a register and never hit the stall, and it now pays a load of
+`items` on every push: 0.37 to 0.45 ns. A push per call, or a loop whose items may alias `len`, such as a
+`vec(size_t)` or a `vec(char *)`, gains about 1 ns per push.
+
+## Arena defaults
+
+Arenas that leave `backing` or `min_chunk` zero follow process wide defaults, set once at startup:
+
+```c
+// 1 KiB first chunks, for programs keeping tens of thousands of tiny arenas.
+cilo_arena_defaults(&(cilo_arena_config){.min_chunk = 1 << 10});
+// every chunk from the heap, which caches its large blocks, so arenas made and dropped in a loop stay off the system.
+cilo_arena_defaults(&(cilo_arena_config){.map_from = SIZE_MAX});
+// the previous behaviour: every chunk mapped, the first of 64 KiB.
+cilo_arena_defaults(&(cilo_arena_config){.min_chunk = 64 << 10, .map_from = 1});
+// any allocator, taken by each arena with its first chunk and kept.
+cilo_arena_defaults(&(cilo_arena_config){.backing = CILO_OF(&my_allocator)});
+```
+
+It returns the defaults it replaced, and `cilo_arena_defaults(nullptr)` only reads them.
 
 ## Build flags
 
