@@ -53,7 +53,7 @@ static void *heap_resize(cilo_allocator *self, void *ptr, size_t old_size, size_
 }
 
 static const cilo_vtable heap_vtable = {heap_resize};
-cilo_heap_allocator cilo_heap = {&heap_vtable};
+const cilo_heap_allocator cilo__heap_allocator = {&heap_vtable};
 
 /* chunks. */
 

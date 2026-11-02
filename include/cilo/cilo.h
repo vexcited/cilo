@@ -441,7 +441,10 @@ void cilo_heap_trim(void);
 typedef struct cilo_heap_allocator {
   cilo_allocator allocator;
 } cilo_heap_allocator;
-extern cilo_heap_allocator cilo_heap;
+// const, so code generic over allocators that lto specializes for the heap sees its vtable and drops the arena
+// path, where gcc would warn about reading an arena out of the heap's one pointer. it is never written.
+extern const cilo_heap_allocator cilo__heap_allocator;
+#define cilo_heap (*(cilo_heap_allocator *)&cilo__heap_allocator)
 
 // blocks of 16 bytes or more that are a multiple of 16 are 16 aligned, and every type's size is a multiple of
 // its alignment, so rounding up to `align` is all most allocations need.

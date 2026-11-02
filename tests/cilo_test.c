@@ -116,6 +116,9 @@ static void vectors(void) {
   for (int i = 0; i < 100; i++) push(&cilo_heap, &ds, i * 0.5);
   CHECK(ds.items[99] == 49.5);
   CILO_FREE(&cilo_heap, ds.items, ds.cap * sizeof *ds.items);
+  // the heap is read only behind its name, still a cilo_heap_allocator with a vtable.
+  CHECK(_Generic(&cilo_heap, cilo_heap_allocator *: true, default: false));
+  CHECK(cilo_heap.allocator && *(cilo_allocator *)&cilo_heap == cilo_heap.allocator);
 }
 
 static void pools(void) {
