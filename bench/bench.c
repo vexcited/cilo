@@ -1,7 +1,12 @@
+#define _DEFAULT_SOURCE
 #include <cilo/dsl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <time.h>
+#include <unistd.h>
+#ifdef __APPLE__
+#include <mach/mach.h>
+#endif
 
 typedef struct Node {
   uint64_t value;
@@ -38,7 +43,57 @@ static Node *nodes[N];
 typedef vec(uint32_t) U32s;
 [[gnu::noinline]] static void push_one(cilo_arena *a, U32s *v, uint32_t x) { push(a, v, x); }
 
+static size_t resident(void) {
+#ifdef __APPLE__
+  mach_task_basic_info_data_t info;
+  mach_msg_type_number_t count = MACH_TASK_BASIC_INFO_COUNT;
+  task_info(mach_task_self(), MACH_TASK_BASIC_INFO, (task_info_t)&info, &count);
+  return info.resident_size;
+#else
+  long pages = 0, rss = 0;
+  FILE *f = fopen("/proc/self/statm", "r");
+  if (f) {
+    if (fscanf(f, "%ld %ld", &pages, &rss) != 2) rss = 0;
+    fclose(f);
+  }
+  return (size_t)rss * (size_t)sysconf(_SC_PAGESIZE);
+#endif
+}
+
+enum { ARENAS = 100'000, FRAMES = 5'000, ALIVE = 20'000 };
+static cilo_arena alive[ALIVE];
+
+// arenas that live briefly: a small one holding a few nodes and a name, a frame one filled with 32 KiB.
+static void arena_lifetimes(void) {
+  BENCH("small arenas, 8 nodes and a name", ARENAS, {
+    for (int i = 0; i < ARENAS; i++) {
+      cilo_arena a = {};
+      for (int j = 0; j < 8; j++) nodes[j] = new(&a, Node, .value = (uint64_t)j);
+      sink += (uint8_t)astrdup(&a, "a name of about thirty bytes")[0] + nodes[7]->value;
+      cilo_arena_drop(&a);
+    }
+  });
+  BENCH("frame arenas, 32 KiB each", FRAMES, {
+    for (int i = 0; i < FRAMES; i++) {
+      cilo_arena a = {};
+      for (int j = 0; j < 256; j++) sink += *(char *)cilo_arena_alloc(&a, 128, 16);
+      cilo_arena_drop(&a);
+    }
+  });
+  size_t before = resident();
+  double start = now_ns();
+  for (int i = 0; i < ALIVE; i++)
+    for (int j = 0; j < 16; j++) new(&alive[i], Node, .value = (uint64_t)j)->next = nodes[0];
+  double took = now_ns() - start;
+  size_t held = resident() - before;
+  for (int i = 0; i < ALIVE; i++) cilo_arena_drop(&alive[i]);
+  printf("%-34s %7.2f ns/op %5.0f MiB\n", "20k live arenas, 16 nodes each", took / ALIVE,
+         (double)held / (1 << 20));
+}
+
 int main(void) {
+  arena_lifetimes();
+
   BENCH("malloc + free, 16 B nodes", N, {
     for (int i = 0; i < N; i++) {
       nodes[i] = malloc(sizeof(Node));

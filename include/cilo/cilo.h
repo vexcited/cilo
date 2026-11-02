@@ -15,7 +15,7 @@ extern "C" {
 /* ========================================================================================================== */
 /* allocators.                                                                                                */
 /*                                                                                                            */
-/*   cilo_arena arena = {};                          zeroed is ready, the first allocation maps a chunk       */
+/*   cilo_arena arena = {};                          zeroed is ready, the first allocation takes a chunk      */
 /*   User *u = CILO_NEW(&arena, User, .id = 1);      typed and initialized, inlined down to a pointer bump    */
 /*   int *xs = CILO_NEW_ARRAY(&arena, int, n);       zeroed, overflow checked                                 */
 /*   cilo_arena_reset(&arena);                       frees everything at once and keeps the chunks            */
@@ -71,7 +71,7 @@ extern void (*cilo_oom_hook)(size_t size);
 /* arenas.                                                                                                    */
 /* ========================================================================================================== */
 
-enum : uint8_t { CILO__MAPPED, CILO__BACKED, CILO__BORROWED };
+enum : uint8_t { CILO__MAPPED, CILO__BACKED, CILO__BORROWED, CILO__HEAP };
 
 typedef struct cilo__chunk {
   alignas(16) struct cilo__chunk *prev;
@@ -91,9 +91,10 @@ typedef struct cilo_arena {
   cilo__chunk *chunk;
   // chunks freed by a rewind or a reset, reused before asking for more.
   cilo__chunk *spare;
-  // where chunks come from. null means zeroed pages from the system, which make zeroing free.
+  // where chunks come from. null means cilo's heap for chunks under 64 KiB, and zeroed pages from the system,
+  // which make zeroing free, for bigger ones.
   cilo_allocator *backing;
-  // the first chunk, zero means 64 KiB. the next ones double, up to 64 MiB steps.
+  // the first chunk, zero means 4 KiB. the next ones double, up to 64 MiB steps.
   size_t min_chunk;
   // no chunk past the first one, out of memory is fatal.
   bool fixed;

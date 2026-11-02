@@ -17,7 +17,8 @@
 #endif
 
 enum : size_t {
-  MIN_CHUNK = 64 << 10,
+  MIN_CHUNK = 4 << 10,
+  MAP_FROM = 64 << 10,
   MAX_STEP = 64 << 20,
 };
 
@@ -49,6 +50,14 @@ static cilo__chunk *chunk_new(cilo_arena *a, size_t bytes) {
     c->dirty = chunk_end(c);
     return c;
   }
+  if (bytes < MAP_FROM) {
+    // a mapping costs two system calls and a whole page at least, small chunks are cheaper on the heap. a heap
+    // block is 16 aligned from 16 bytes up, and whatever the size class adds is the chunk's too.
+    c = cilo_malloc((bytes + 15) & ~(size_t)15);
+    *c = (cilo__chunk){.size = cilo_msize(c), .kind = CILO__HEAP};
+    c->dirty = chunk_end(c);
+    return c;
+  }
 #if CILO__PAGES
   size_t page = (size_t)sysconf(_SC_PAGESIZE);
   bytes = (bytes + page - 1) & ~(page - 1);
@@ -76,6 +85,9 @@ static void chunk_free(cilo_arena *a, cilo__chunk *c) {
   case CILO__BACKED:
     if (a->backing) cilo_free(a->backing, c, c->size);
     else free(c);
+    break;
+  case CILO__HEAP:
+    cilo_mfree(c);
     break;
   case CILO__BORROWED:
     break;

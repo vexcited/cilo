@@ -155,6 +155,43 @@ static void scratch_and_strings(void) {
   cilo_thread_drop();
 }
 
+static void *scratch_worker(void *) {
+  scratch(tmp) {
+    char *s = astrdup(tmp, "dropped at thread exit");
+    CHECK(s[0] == 'd');
+  }
+  return nullptr;
+}
+
+static void arena_sources(void) {
+  // a zeroed arena starts on a small chunk from the heap, and maps the big ones.
+  cilo_arena arena = {};
+  (void)new(&arena, int, 1);
+  CHECK(arena.chunk->kind == CILO__HEAP);
+  CHECK(cilo_arena_stats(&arena).reserved >= 4096 && cilo_arena_stats(&arena).reserved < 8192);
+  char *big = new_array(&arena, char, 1 << 20);
+  CHECK(arena.chunk->kind == CILO__MAPPED && big[0] == 0 && big[(1 << 20) - 1] == 0);
+  // heap chunks are not zero, zeroed allocations clear them.
+  cilo_arena_reset(&arena);
+  for (int i = 0; i < 100; i++) memset(new_array(&arena, char, 40), 0xff, 40);
+  cilo_arena_reset(&arena);
+  bool zero = true;
+  for (int i = 0; i < 100; i++) {
+    char *p = new_array(&arena, char, 40);
+    for (int j = 0; j < 40; j++) zero &= p[j] == 0;
+  }
+  CHECK(zero);
+  cilo_arena_drop(&arena);
+  CHECK(arena.backing == nullptr);
+
+  // scratch arenas on heap chunks are dropped when their thread exits.
+  pthread_t t;
+  for (int i = 0; i < 4; i++) {
+    pthread_create(&t, nullptr, scratch_worker, nullptr);
+    pthread_join(t, nullptr);
+  }
+}
+
 static void generic_dispatch(void) {
   cilo_arena arena = {};
   cilo_allocator *any = CILO_OF(&arena);
@@ -323,6 +360,7 @@ int main(void) {
   pools();
   scratch_and_strings();
   generic_dispatch();
+  arena_sources();
   if (failures) return 1;
   puts("ok");
   return 0;
