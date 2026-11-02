@@ -1,7 +1,7 @@
 # cilo
 
 Allocators for C23, the memory layer under every CiKo library: a thread safe general purpose heap, arenas, pools,
-growable arrays and scratch space, with a typed macro layer that inlines down to a few instructions.
+growable arrays, hash maps and scratch space, with a typed macro layer that inlines down to a few instructions.
 
 ```c
 #include <cilo/dsl.h>
@@ -174,6 +174,47 @@ cilo_arena_defaults(&(cilo_arena_config){.backing = CILO_OF(&my_allocator)});
 
 It returns the defaults it replaced, and `cilo_arena_defaults(nullptr)` only reads them.
 
+## Maps and hashing
+
+`cilo/map.h`, included by `cilo/dsl.h`, has a typed hash map and the hash under it:
+
+```c
+map(const char *, int) ids = {};                        // zeroed is ready
+*map_put(&arena, &ids, "ada") = 1;                      // finds or inserts, a pointer to the value
+int *id = map_get(&ids, "ada");                         // null when missing
+map_put(&cilo_heap, &points, ((Point){1, 2}), &created); // any key without padding, created says which
+const char **known = map_get_n(&names, text, len);      // a string key from a slice, for interning
+map_each(e, &ids) printf("%s %d\n", e->key, e->val);
+map_del(&ids, "ada");
+map_drop(&arena, &ids);
+```
+
+- **Groups of eight.** Each slot has a control byte, empty, deleted, or seven bits of its key's hash. A lookup
+  matches the eight bytes of a group at once with word arithmetic, so it usually reads one control word and
+  compares one key, and a miss stops at the first group with an empty slot. Tables are seven eighths full at most
+  and deletions need no shifting.
+- **Any key.** Keys compare by their bytes, `char *` and `const char *` keys by content. A compound literal key
+  goes in parentheses because of its commas.
+- **Allocators like `push`.** The calls that insert take an arena, `&cilo_heap` or any `cilo_allocator *`, the
+  same one every time. Inserting may move the table, so a value pointer lasts until the next insertion.
+- **`cilo_hash`** is a 64 bit hash after wyhash, inlined, two loads and two multiplications for keys up to 16
+  bytes. `cilo_hash_u64` folds one multiplication. Neither is for hashes that leave the process.
+
+Against the linear probing map civue and vektra2 each carry, nonzero `uint64_t` keys, a splitmix finalizer, FNV
+for strings and three quarters full at most, from `bench/bench.c`:
+
+| maps                                     | reference  | cilo       |
+| ---------------------------------------- | ---------- | ---------- |
+| insert 1M `uint64_t` keys                | 27.5 ns/op | 17.0 ns/op |
+| hit among 1M keys, random order          | 11.1 ns/op | 9.0 ns/op  |
+| miss among 1M keys                       | 19.7 ns/op | 2.4 ns/op  |
+| hit among 4k keys, in cache              | 1.26 ns/op | 1.65 ns/op |
+| intern 100k names, each 10 times         | 14.6 ns/op | 15.0 ns/op |
+
+Inserts and misses are where the groups pay. Hits among a million keys are cache misses for both, and moved
+between a tie and this lead from run to run. In cache, the reference's shorter path wins, the group match is the
+price of fast misses and deletions. Interning is a tie, it is mostly the string compare.
+
 ## Build flags
 
 Apple clang's machine outliner, on by default at `-O2` on arm64, turns repeated sequences of inlined fast paths
@@ -223,6 +264,15 @@ so a scratch block may wait. They are dropped when their thread exits.
 | `arena_fixed` | `CILO_ARENA_FIXED(buf)`                     |
 | `astrdup`     | `CILO_STRDUP(a, s)`                         |
 | `aprintf`     | `CILO_PRINTF(a, fmt, ...)`                  |
+| `map`         | `CILO_MAP(K, V)`                            |
+| `map_get`     | `CILO_MAP_GET(m, key)`                      |
+| `map_get_n`   | `CILO_MAP_GET_N(m, s, len)`                 |
+| `map_has`     | `CILO_MAP_HAS(m, key)`                      |
+| `map_put`     | `CILO_MAP_PUT(a, m, key, created?)`         |
+| `map_del`     | `CILO_MAP_DEL(m, key)`                      |
+| `map_each`    | `CILO_MAP_EACH(e, m)`                       |
+| `map_clear`   | `CILO_MAP_CLEAR(m)`                         |
+| `map_drop`    | `CILO_MAP_DROP(a, m)`                       |
 
 ## Limits
 
