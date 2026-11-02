@@ -240,6 +240,82 @@ static void arena_sources(void) {
   }
 }
 
+typedef struct Point {
+  int32_t x, y;
+} Point;
+
+static void maps(void) {
+  // the hash spreads keys that differ in one bit or one byte, and its lengths agree with strings.
+  CHECK(cilo_hash("ada", 3) == cilo_hash_str("ada") && cilo_hash("ada", 3) != cilo_hash("adb", 3));
+  CHECK(cilo_hash("", 0) != cilo_hash("\0", 1) && cilo_hash_u64(1) != cilo_hash_u64(2));
+  char long_key[100];
+  memset(long_key, 'k', sizeof long_key);
+  uint64_t first = cilo_hash(long_key, 100);
+  long_key[57] = 'j';
+  CHECK(first != cilo_hash(long_key, 100) && first != cilo_hash(long_key, 99));
+
+  // integer keys through a million inserts, lookups, removals and inserts again.
+  enum { N = 1'000'000 };
+  map(uint64_t, uint64_t) ints = {};
+  CHECK(map_get(&ints, 1) == nullptr && !map_del(&ints, 1));
+  for (uint64_t i = 0; i < N; i++) *map_put(&cilo_heap, &ints, i * 7919) = i;
+  CHECK(ints.raw.len == N);
+  bool found = true;
+  for (uint64_t i = 0; i < N; i++) found &= map_get(&ints, i * 7919) && *map_get(&ints, i * 7919) == i;
+  CHECK(found && !map_has(&ints, 1));
+  for (uint64_t i = 0; i < N; i += 2) CHECK(map_del(&ints, i * 7919));
+  CHECK(ints.raw.len == N / 2 && !map_has(&ints, 0) && *map_get(&ints, 7919) == 1);
+  bool created = true;
+  CHECK(*map_put(&cilo_heap, &ints, 7919, &created) == 1 && !created);
+  for (uint64_t i = 0; i < N; i += 2) {
+    uint64_t *v = map_put(&cilo_heap, &ints, i * 7919, &created);
+    found &= created && *v == 0;
+    *v = i;
+  }
+  CHECK(found && ints.raw.len == N);
+  size_t seen = 0;
+  uint64_t sum = 0;
+  map_each(e, &ints) {
+    seen++;
+    sum += e->val;
+  }
+  CHECK(seen == N && sum == (uint64_t)N * (N - 1) / 2);
+  // churn on one small map rebuilds it in place instead of growing it.
+  map(uint32_t, char) small = {};
+  for (uint32_t i = 0; i < 100000; i++) {
+    *map_put(&cilo_heap, &small, i) = 1;
+    if (i >= 5) map_del(&small, i - 5);
+  }
+  CHECK(small.raw.len == 5 && small.raw.cap <= 16);
+  map_drop(&cilo_heap, &small);
+  map_clear(&ints);
+  CHECK(ints.raw.len == 0 && !map_has(&ints, 7919));
+  map_drop(&cilo_heap, &ints);
+  CHECK(ints.raw.cap == 0 && map_get(&ints, 1) == nullptr);
+
+  // string keys by content, looked up by slices too, in an arena.
+  with_arena(a) {
+    map(const char *, int) ids = {};
+    char name[32];
+    for (int i = 0; i < 5000; i++) {
+      snprintf(name, sizeof name, "font-%d", i);
+      *map_put(a, &ids, astrdup(a, name)) = i;
+    }
+    snprintf(name, sizeof name, "font-%d", 4321);
+    CHECK(*map_get(&ids, name) == 4321 && !map_has(&ids, "font-5000"));
+    CHECK(*map_get_n(&ids, "font-12345", 7) == 12 && map_get_n(&ids, "font-", 4) == nullptr);
+    *map_put(a, &ids, "") = -1;
+    CHECK(*map_get_n(&ids, "", 0) == -1 && *map_get(&ids, "") == -1);
+    CHECK(map_del(&ids, "font-0") && !map_has(&ids, "font-0") && ids.raw.len == 5000);
+
+    // any key without padding, compared by its bytes.
+    map(Point, const char *) points = {};
+    *map_put(a, &points, ((Point){1, 2})) = "a";
+    *map_put(a, &points, ((Point){2, 1})) = "b";
+    CHECK(strcmp(*map_get(&points, ((Point){2, 1})), "b") == 0 && !map_has(&points, ((Point){1, 1})));
+  }
+}
+
 static void generic_dispatch(void) {
   cilo_arena arena = {};
   cilo_allocator *any = CILO_OF(&arena);
@@ -409,6 +485,7 @@ int main(void) {
   scratch_and_strings();
   generic_dispatch();
   arena_sources();
+  maps();
   if (failures) return 1;
   puts("ok");
   return 0;

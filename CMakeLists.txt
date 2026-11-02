@@ -8,7 +8,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ${PROJECT_IS_TOP_LEVEL})
 
 option(CILO_BUILD_TESTS "build the cilo tests and benchmarks" ${PROJECT_IS_TOP_LEVEL})
 
-add_library(cilo STATIC src/cilo.c src/heap.c)
+add_library(cilo STATIC src/cilo.c src/heap.c src/map.c)
 find_package(Threads REQUIRED)
 target_link_libraries(cilo PUBLIC Threads::Threads)
 add_library(cilo::cilo ALIAS cilo)

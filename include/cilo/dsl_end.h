@@ -15,4 +15,13 @@
 #undef arena_fixed
 #undef astrdup
 #undef aprintf
+#undef map
+#undef map_get
+#undef map_get_n
+#undef map_has
+#undef map_put
+#undef map_del
+#undef map_each
+#undef map_clear
+#undef map_drop
 #undef CILO_DSL_H
