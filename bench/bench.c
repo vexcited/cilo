@@ -91,7 +91,181 @@ static void arena_lifetimes(void) {
          (double)held / (1 << 20));
 }
 
+/* maps, against the linear probing map civue and vektra2 each carry: nonzero u64 keys, a splitmix finalizer, */
+/* fnv over words for strings, three quarters full at most.                                                   */
+
+typedef struct RefSlot {
+  uint64_t key, val;
+} RefSlot;
+typedef struct RefMap {
+  RefSlot *slots;
+  uint32_t cap, len;
+} RefMap;
+
+static uint64_t ref_mix(uint64_t x) {
+  x ^= x >> 33;
+  x *= 0xff51afd7ed558ccdull;
+  x ^= x >> 33;
+  x *= 0xc4ceb9fe1a85ec53ull;
+  return x ^ (x >> 33);
+}
+
+static uint64_t ref_hash(const void *p, size_t n) {
+  const uint8_t *s = p;
+  uint64_t h = 0xcbf29ce484222325ull;
+  size_t i = 0;
+  for (; i + 8 <= n; i += 8) {
+    uint64_t w;
+    memcpy(&w, s + i, 8);
+    h = (h ^ w) * 0x100000001b3ull;
+    h ^= h >> 29;
+  }
+  for (; i < n; i++) h = (h ^ s[i]) * 0x100000001b3ull;
+  return ref_mix(h ^ n);
+}
+
+static void ref_rehash(RefMap *m, uint32_t cap) {
+  RefSlot *old = m->slots;
+  uint32_t n = m->cap;
+  m->slots = calloc(cap, sizeof(RefSlot));
+  m->cap = cap;
+  for (uint32_t i = 0; i < n; i++) {
+    if (!old[i].key) continue;
+    uint32_t at = (uint32_t)ref_mix(old[i].key) & (cap - 1);
+    while (m->slots[at].key) at = (at + 1) & (cap - 1);
+    m->slots[at] = old[i];
+  }
+  free(old);
+}
+
+static uint64_t *ref_slot(RefMap *m, uint64_t key) {
+  if ((m->len + 1) * 4 > m->cap * 3) ref_rehash(m, m->cap ? m->cap * 2 : 16);
+  for (uint32_t i = (uint32_t)ref_mix(key) & (m->cap - 1);; i = (i + 1) & (m->cap - 1)) {
+    if (m->slots[i].key == key) return &m->slots[i].val;
+    if (!m->slots[i].key) {
+      m->slots[i].key = key;
+      m->len++;
+      return &m->slots[i].val;
+    }
+  }
+}
+
+static uint64_t *ref_get(const RefMap *m, uint64_t key) {
+  if (!m->cap) return nullptr;
+  for (uint32_t i = (uint32_t)ref_mix(key) & (m->cap - 1);; i = (i + 1) & (m->cap - 1)) {
+    if (m->slots[i].key == key) return &m->slots[i].val;
+    if (!m->slots[i].key) return nullptr;
+  }
+}
+
+// vektra2's interning without its lock: the hash finds a chain of strings that share it.
+typedef struct Interned {
+  struct Interned *next;
+  size_t n;
+  char s[];
+} Interned;
+
+static const char *ref_intern(cilo_arena *a, RefMap *m, const char *s, size_t n) {
+  uint64_t *slot = ref_slot(m, ref_hash(s, n) | 1);
+  for (Interned *e = (Interned *)*slot; e; e = e->next)
+    if (e->n == n && memcmp(e->s, s, n) == 0) return e->s;
+  Interned *e = cilo_arena_alloc(a, sizeof(Interned) + n + 1, alignof(Interned));
+  *e = (Interned){(Interned *)*slot, n};
+  memcpy(e->s, s, n);
+  e->s[n] = '\0';
+  *slot = (uint64_t)e;
+  return e->s;
+}
+
+// the table on the heap, the strings in an arena, a string's own copy as the value.
+typedef map(const char *, const char *) Interner;
+
+static const char *cilo_intern(cilo_arena *a, Interner *m, const char *s, size_t n) {
+  const char **known = map_get_n(m, s, n);
+  if (known) return *known;
+  char *copy = memcpy(cilo_arena_alloc(a, n + 1, 1), s, n);
+  copy[n] = '\0';
+  return *map_put(&cilo_heap, m, copy) = copy;
+}
+
+enum { KEYS = 1 << 20, NAMES = 100'000 };
+static uint64_t keys[KEYS];
+static char names[NAMES][24];
+
+static void maps(void) {
+  uint64_t seed = 1;
+  for (int i = 0; i < KEYS; i++) keys[i] = (seed = seed * 6364136223846793005u + 1442695040888963407u) | 1;
+  for (int i = 0; i < NAMES; i++) snprintf(names[i], sizeof names[i], "font-family-%d", i * 7);
+
+  BENCH("map u64 insert 1M, reference", KEYS, {
+    RefMap m = {};
+    for (int i = 0; i < KEYS; i++) *ref_slot(&m, keys[i]) = (uint64_t)i;
+    sink += m.len;
+    free(m.slots);
+  });
+  BENCH("map u64 insert 1M, cilo", KEYS, {
+    map(uint64_t, uint64_t) m = {};
+    for (int i = 0; i < KEYS; i++) *map_put(&cilo_heap, &m, keys[i]) = (uint64_t)i;
+    sink += m.raw.len;
+    map_drop(&cilo_heap, &m);
+  });
+
+  RefMap ref = {};
+  map(uint64_t, uint64_t) mine = {};
+  for (int i = 0; i < KEYS; i++) {
+    *ref_slot(&ref, keys[i]) = (uint64_t)i;
+    *map_put(&cilo_heap, &mine, keys[i]) = (uint64_t)i;
+  }
+  BENCH("map u64 hit, reference", KEYS, {
+    for (int i = 0; i < KEYS; i++) sink += *ref_get(&ref, keys[((unsigned)i * 7919) & (KEYS - 1)]);
+  });
+  BENCH("map u64 hit, cilo", KEYS, {
+    for (int i = 0; i < KEYS; i++) sink += *map_get(&mine, keys[((unsigned)i * 7919) & (KEYS - 1)]);
+  });
+  BENCH("map u64 miss, reference", KEYS, {
+    for (int i = 0; i < KEYS; i++) sink += ref_get(&ref, keys[i] + 2) != nullptr;
+  });
+  BENCH("map u64 miss, cilo", KEYS, {
+    for (int i = 0; i < KEYS; i++) sink += map_has(&mine, keys[i] + 2);
+  });
+  free(ref.slots);
+  map_drop(&cilo_heap, &mine);
+
+  // a map that stays in cache, where the probing itself is what costs.
+  ref = (RefMap){};
+  for (int i = 0; i < 4096; i++) {
+    *ref_slot(&ref, keys[i]) = (uint64_t)i;
+    *map_put(&cilo_heap, &mine, keys[i]) = (uint64_t)i;
+  }
+  BENCH("map u64 hit, 4k keys, reference", KEYS, {
+    for (int i = 0; i < KEYS; i++) sink += *ref_get(&ref, keys[((unsigned)i * 7919) & 4095]);
+  });
+  BENCH("map u64 hit, 4k keys, cilo", KEYS, {
+    for (int i = 0; i < KEYS; i++) sink += *map_get(&mine, keys[((unsigned)i * 7919) & 4095]);
+  });
+  free(ref.slots);
+  map_drop(&cilo_heap, &mine);
+
+  cilo_arena strings = {};
+  BENCH("intern 100k names 10 times, reference", 10 * NAMES, {
+    RefMap m = {};
+    for (int r = 0; r < 10; r++)
+      for (int i = 0; i < NAMES; i++) sink += (uintptr_t)ref_intern(&strings, &m, names[i], strlen(names[i]));
+    free(m.slots);
+    cilo_arena_reset(&strings);
+  });
+  BENCH("intern 100k names 10 times, cilo", 10 * NAMES, {
+    Interner m = {};
+    for (int r = 0; r < 10; r++)
+      for (int i = 0; i < NAMES; i++) sink += (uintptr_t)cilo_intern(&strings, &m, names[i], strlen(names[i]));
+    map_drop(&cilo_heap, &m);
+    cilo_arena_reset(&strings);
+  });
+  cilo_arena_drop(&strings);
+}
+
 int main(void) {
+  maps();
   arena_lifetimes();
 
   BENCH("malloc + free, 16 B nodes", N, {
