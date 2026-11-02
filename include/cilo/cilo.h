@@ -91,10 +91,10 @@ typedef struct cilo_arena {
   cilo__chunk *chunk;
   // chunks freed by a rewind or a reset, reused before asking for more.
   cilo__chunk *spare;
-  // where chunks come from. null means cilo's heap for chunks under 64 KiB, and zeroed pages from the system,
-  // which make zeroing free, for bigger ones.
+  // where chunks come from. null follows cilo_arena_defaults: cilo's heap for chunks under 64 KiB, and zeroed
+  // pages from the system, which make zeroing free, for bigger ones.
   cilo_allocator *backing;
-  // the first chunk, zero means 4 KiB. the next ones double, up to 64 MiB steps.
+  // the first chunk, zero means the default, 4 KiB. the next ones double, up to 64 MiB steps.
   size_t min_chunk;
   // no chunk past the first one, out of memory is fatal.
   bool fixed;
@@ -163,6 +163,21 @@ void cilo_arena_reset(cilo_arena *a);
 void cilo_arena_drop(cilo_arena *a);
 // returns the chunks kept for reuse.
 void cilo_arena_trim(cilo_arena *a);
+
+// how arenas that leave `backing` or `min_chunk` zero get their chunks.
+typedef struct cilo_arena_config {
+  // the backing they take with their first chunk and keep. null leaves them on the built in sources.
+  cilo_allocator *backing;
+  // their first chunk, zero means 4 KiB.
+  size_t min_chunk;
+  // with no backing, chunks this big or bigger are zeroed pages mapped from the system, smaller ones come from
+  // cilo's heap. zero means 64 KiB, 1 maps every chunk and SIZE_MAX none.
+  size_t map_from;
+} cilo_arena_config;
+
+// sets the process wide defaults when `config` is not null, and returns the ones in effect before. arenas read
+// them when they need a chunk, so set them before the arenas they should apply to start allocating.
+cilo_arena_config cilo_arena_defaults(const cilo_arena_config *config);
 
 // an arena starting on `buf`, a stack array for instance, spilling to the system once it is full.
 cilo_arena cilo_arena_on(void *buf, size_t size, bool fixed);

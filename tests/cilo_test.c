@@ -155,6 +155,20 @@ static void scratch_and_strings(void) {
   cilo_thread_drop();
 }
 
+// an allocator on the heap that counts what it holds.
+typedef struct counting {
+  cilo_allocator allocator;
+  size_t live;
+} counting;
+
+static void *counting_resize(cilo_allocator *self, void *ptr, size_t old_size, size_t new_size, size_t align) {
+  counting *c = (counting *)self;
+  c->live += new_size - old_size;
+  return cilo_heap_realloc(&cilo_heap, ptr, old_size, new_size, align);
+}
+
+static const cilo_vtable counting_vtable = {counting_resize};
+
 static void *scratch_worker(void *) {
   scratch(tmp) {
     char *s = astrdup(tmp, "dropped at thread exit");
@@ -183,6 +197,40 @@ static void arena_sources(void) {
   CHECK(zero);
   cilo_arena_drop(&arena);
   CHECK(arena.backing == nullptr);
+
+  // the defaults: a smaller first chunk, every chunk mapped, or a backing taken by arenas without one.
+  cilo_arena_config built_in = cilo_arena_defaults(&(cilo_arena_config){.min_chunk = 1024});
+  CHECK(built_in.backing == nullptr && built_in.min_chunk == 0 && built_in.map_from == 0);
+  (void)new(&arena, int);
+  CHECK(cilo_arena_stats(&arena).reserved < 2048);
+  cilo_arena_drop(&arena);
+
+  cilo_arena_defaults(&(cilo_arena_config){.map_from = 1});
+  int *zeroed = new_array(&arena, int, 10);
+  CHECK(arena.chunk->kind == CILO__MAPPED && arena.dirty == (char *)zeroed && zeroed[9] == 0);
+  cilo_arena_drop(&arena);
+
+  counting count = {.allocator = &counting_vtable};
+  cilo_arena_defaults(&(cilo_arena_config){.backing = &count.allocator});
+  char buf[256];
+  cilo_arena stack = arena_on(buf);
+  (void)new(&arena, int);
+  CHECK(arena.backing == &count.allocator && count.live >= 4096);
+  // an arena on a buffer spills to the default backing too, nothing it holds came from elsewhere.
+  (void)new_array(&stack, char, 1024);
+  CHECK(stack.backing == &count.allocator && stack.chunk->kind == CILO__BACKED);
+  cilo_arena_drop(&stack);
+  cilo_arena_drop(&arena);
+  CHECK(count.live == 0 && arena.backing == &count.allocator);
+  // an arena already holding chunks keeps its sources.
+  cilo_arena_defaults(&built_in);
+  cilo_arena kept = {};
+  (void)new(&kept, int);
+  cilo_arena_defaults(&(cilo_arena_config){.backing = &count.allocator});
+  (void)new_array(&kept, char, 8192);
+  CHECK(kept.backing == nullptr && count.live == 0);
+  cilo_arena_drop(&kept);
+  CHECK(cilo_arena_defaults(&built_in).backing == &count.allocator);
 
   // scratch arenas on heap chunks are dropped when their thread exits.
   pthread_t t;

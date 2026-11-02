@@ -22,6 +22,24 @@ enum : size_t {
   MAX_STEP = 64 << 20,
 };
 
+static _Atomic(cilo_allocator *) default_backing;
+static _Atomic(size_t) default_min_chunk;
+static _Atomic(size_t) default_map_from;
+
+cilo_arena_config cilo_arena_defaults(const cilo_arena_config *config) {
+  cilo_arena_config old = {
+    .backing = atomic_load_explicit(&default_backing, memory_order_relaxed),
+    .min_chunk = atomic_load_explicit(&default_min_chunk, memory_order_relaxed),
+    .map_from = atomic_load_explicit(&default_map_from, memory_order_relaxed),
+  };
+  if (config) {
+    atomic_store_explicit(&default_backing, config->backing, memory_order_relaxed);
+    atomic_store_explicit(&default_min_chunk, config->min_chunk, memory_order_relaxed);
+    atomic_store_explicit(&default_map_from, config->map_from, memory_order_relaxed);
+  }
+  return old;
+}
+
 void (*cilo_oom_hook)(size_t size);
 
 void cilo_oom(size_t size) {
@@ -50,7 +68,8 @@ static cilo__chunk *chunk_new(cilo_arena *a, size_t bytes) {
     c->dirty = chunk_end(c);
     return c;
   }
-  if (bytes < MAP_FROM) {
+  size_t map_from = atomic_load_explicit(&default_map_from, memory_order_relaxed);
+  if (bytes < (map_from ? map_from : MAP_FROM)) {
     // a mapping costs two system calls and a whole page at least, small chunks are cheaper on the heap. a heap
     // block is 16 aligned from 16 bytes up, and whatever the size class adds is the chunk's too.
     c = cilo_malloc((bytes + 15) & ~(size_t)15);
@@ -136,7 +155,12 @@ void *cilo__arena_grow(cilo_arena *a, size_t size, size_t align) {
   if (c) {
     *link = c->prev;
   } else {
-    size_t min = a->min_chunk ? a->min_chunk : MIN_CHUNK;
+    // the default backing is only taken by an arena that holds no chunk of its own yet, so each chunk goes back
+    // where it came from.
+    bool owns = a->spare || (a->chunk && a->chunk->kind != CILO__BORROWED);
+    if (!a->backing && !owns) a->backing = atomic_load_explicit(&default_backing, memory_order_relaxed);
+    size_t min = a->min_chunk ? a->min_chunk : atomic_load_explicit(&default_min_chunk, memory_order_relaxed);
+    if (!min) min = MIN_CHUNK;
     size_t bytes = a->chunk ? a->chunk->size * 2 : min;
     if (bytes > MAX_STEP) bytes = MAX_STEP;
     if (bytes < min) bytes = min;
