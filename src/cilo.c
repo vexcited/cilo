@@ -5,6 +5,8 @@
 
 #include <pthread.h>
 #include <stdarg.h>
+#include <stdcountof.h>
+#include <stddefer.h>
 #include <stdio.h>
 #include <stdlib.h>
 
@@ -269,25 +271,21 @@ cilo_stats cilo_arena_stats(const cilo_arena *a) {
 char *cilo_printf(cilo_allocator *a, const char *fmt, ...) {
   va_list ap, again;
   va_start(ap, fmt);
+  defer va_end(ap);
   va_copy(again, ap);
+  defer va_end(again);
   int n;
   cilo_arena *arena = *a ? nullptr : (cilo_arena *)a;
   if (!CILO_ASAN && arena && arena->cur) {
     size_t avail = (size_t)(arena->end - arena->cur);
     n = vsnprintf(arena->cur, avail, fmt, ap);
-    if (n >= 0 && (size_t)n < avail) {
-      va_end(again);
-      va_end(ap);
-      return cilo_arena_alloc(arena, (size_t)n + 1, 1);
-    }
+    if (n >= 0 && (size_t)n < avail) return cilo_arena_alloc(arena, (size_t)n + 1, 1);
   } else {
     n = vsnprintf(nullptr, 0, fmt, ap);
   }
-  va_end(ap);
   if (n < 0) n = 0;
   char *s = cilo_alloc(a, (size_t)n + 1, 1);
   vsnprintf(s, (size_t)n + 1, fmt, again);
-  va_end(again);
   return s;
 }
 
@@ -323,5 +321,5 @@ cilo_arena *cilo_scratch_bind(cilo_arena *slots) {
 }
 
 void cilo_thread_drop(void) {
-  for (size_t i = 0; i < CILO_SCRATCH_COUNT; i++) cilo_arena_drop(&cilo__scratch_own[i]);
+  for (size_t i = 0; i < countof(cilo__scratch_own); i++) cilo_arena_drop(&cilo__scratch_own[i]);
 }

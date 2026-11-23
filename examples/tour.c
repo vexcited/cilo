@@ -1,4 +1,5 @@
 #include <cilo/dsl.h>
+#include <stdcountof.h>
 #include <stdio.h>
 
 typedef struct Entry {
@@ -28,7 +29,7 @@ int main(void) {
   cilo_arena words = arena_on(stack);
   Entries entries = {};
   Entry *head = nullptr;
-  for (size_t i = 0; i < sizeof text / sizeof *text; i++) head = count(&words, &entries, head, text[i]);
+  for (size_t i = 0; i < countof(text); i++) head = count(&words, &entries, head, text[i]);
 
   scratch(tmp) {
     vec(const char *) lines = {};
