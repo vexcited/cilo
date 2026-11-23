@@ -5,7 +5,7 @@ root=${here:h}
 comp=${1:?competitor directory}
 out=${2:-/tmp/cilo-compare}
 mkdir -p $out
-cc=(${CC:-cc} -std=c2x -O2 -DNDEBUG -Wall -Wextra)
+cc=(${CC:-cc} -std=c2y -fdefer-ts -O2 -DNDEBUG -Wall -Wextra)
 # clang outlines repeated sequences of hot loops into calls at -O2 on arm64, which undoes inlining.
 print 'int main(void) { return 0; }' | $cc -mno-outline -x c - -o $out/probe 2>/dev/null && cc+=(-mno-outline)
 rm -f $out/probe
