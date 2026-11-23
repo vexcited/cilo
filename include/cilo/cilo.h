@@ -455,14 +455,21 @@ extern const cilo_heap_allocator cilo__heap_allocator;
 #define cilo_heap (*(cilo_heap_allocator *)&cilo__heap_allocator)
 
 // blocks of 16 bytes or more that are a multiple of 16 are 16 aligned, and every type's size is a multiple of
-// its alignment, so rounding up to `align` is all most allocations need.
-[[gnu::always_inline, gnu::returns_nonnull]]
+// its alignment, so rounding up to `align` is all most allocations need. a size of 0 still takes a block as
+// aligned as asked, and one that would wrap around is out of memory.
+[[gnu::always_inline]] static inline size_t cilo__heap_round(size_t size, size_t align) {
+  if (CILO_UNLIKELY(size > SIZE_MAX - 15)) cilo_oom(size);
+  size_t rounded = (size + align - 1) & ~(align - 1);
+  return rounded ? rounded : align;
+}
+
+[[gnu::always_inline, gnu::malloc, gnu::returns_nonnull, gnu::alloc_size(2), gnu::alloc_align(3)]]
 static inline void *cilo_heap_alloc(cilo_heap_allocator *, size_t size, size_t align) {
-  return align <= 16 ? cilo_malloc((size + align - 1) & ~(align - 1)) : cilo_memalign(align, size);
+  return align <= 16 ? cilo_malloc(cilo__heap_round(size, align)) : cilo_memalign(align, size);
 }
 [[gnu::always_inline, gnu::malloc, gnu::returns_nonnull, gnu::alloc_size(2), gnu::alloc_align(3)]]
 static inline void *cilo_heap_alloc_zeroed(cilo_heap_allocator *h, size_t size, size_t align) {
-  if (align <= 16) return cilo_calloc(1, (size + align - 1) & ~(align - 1));
+  if (align <= 16) return cilo_calloc(1, cilo__heap_round(size, align));
   return memset(cilo_heap_alloc(h, size, align), 0, size);
 }
 [[gnu::always_inline, gnu::malloc, gnu::returns_nonnull, gnu::alloc_size(2, 3), gnu::alloc_align(4)]]
@@ -477,7 +484,7 @@ static inline void *cilo_heap_realloc(cilo_heap_allocator *h, void *ptr, size_t 
     cilo_mfree(ptr);
     return nullptr;
   }
-  if (align <= 16) return cilo_mrealloc(ptr, (new_size + align - 1) & ~(align - 1));
+  if (align <= 16) return cilo_mrealloc(ptr, cilo__heap_round(new_size, align));
   void *p = cilo_heap_alloc(h, new_size, align);
   if (ptr) {
     memcpy(p, ptr, old_size < new_size ? old_size : new_size);

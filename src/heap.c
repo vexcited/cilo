@@ -749,7 +749,7 @@ void *cilo_mrealloc(void *ptr, size_t size) {
 
 void *cilo_memalign(size_t align, size_t size) {
   if (align & (align - 1)) cilo_oom(size);
-  if (align <= 16) return cilo_malloc((size + 15) & ~(size_t)15);
+  if (align <= 16) return cilo_malloc(cilo__heap_round(size, 16));
   size_t padded;
   if (ckd_add(&padded, size, align - 1)) cilo_oom(size);
   if (padded > CILO__MEDIUM_MAX) return large_alloc(size, align, false);

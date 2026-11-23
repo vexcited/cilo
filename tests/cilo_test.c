@@ -1,5 +1,6 @@
 #include <cilo/dsl.h>
 #include <pthread.h>
+#include <setjmp.h>
 #include <stdio.h>
 #include <stdlib.h>
 
@@ -363,6 +364,50 @@ static void arena_rounding(void) {
   cilo_arena_drop(&on);
 }
 
+static jmp_buf oom_jump;
+static void oom_escape(size_t) { longjmp(oom_jump, 1); }
+
+static void heap_rounding(void) {
+  // a size of zero is as aligned as asked, like any other.
+  bool aligned = true;
+  for (size_t align = 1; align <= 64; align *= 2) {
+    for (size_t size = 0; size < 300; size++) {
+      void *p = cilo_heap_alloc(&cilo_heap, size, align);
+      void *z = cilo_heap_alloc_zeroed(&cilo_heap, size, align);
+      aligned &= (uintptr_t)p % align == 0 && (uintptr_t)z % align == 0;
+      cilo_mfree(p);
+      cilo_mfree(z);
+    }
+  }
+  CHECK(aligned);
+  void *m = cilo_memalign(16, 0);
+  CHECK((uintptr_t)m % 16 == 0);
+  cilo_mfree(m);
+
+  // a size that would wrap around when rounded is out of memory, not a tiny block.
+  void (*hook)(size_t) = cilo_oom_hook;
+  cilo_oom_hook = oom_escape;
+  volatile size_t huge = SIZE_MAX - 3;
+  volatile int caught = 0;
+  if (!setjmp(oom_jump)) (void)cilo_heap_alloc(&cilo_heap, huge, 16);
+  else caught++;
+  if (!setjmp(oom_jump)) (void)cilo_heap_alloc_zeroed(&cilo_heap, huge, 8);
+  else caught++;
+#if !CILO_ASAN
+  // asan aborts on a size this big before cilo sees it.
+  if (!setjmp(oom_jump)) (void)cilo_memalign(16, huge);
+  else caught++;
+#else
+  caught++;
+#endif
+  void *small = cilo_malloc(16);
+  if (!setjmp(oom_jump)) small = cilo_heap_realloc(&cilo_heap, small, 16, huge, 4);
+  else caught++;
+  cilo_mfree(small);
+  cilo_oom_hook = hook;
+  CHECK(caught == 4);
+}
+
 static void heap_basics(void) {
   // every size up to the large ones, each block written and checked, then freed in a scrambled order.
   enum { N = 4000 };
@@ -521,6 +566,7 @@ int main(void) {
   generic_dispatch();
   arena_sources();
   arena_rounding();
+  heap_rounding();
   maps();
   if (failures) return 1;
   puts("ok");
