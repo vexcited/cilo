@@ -152,9 +152,9 @@ typedef enum : uint8_t { CILO__KEY_BYTES, CILO__KEY_STR } cilo__key_kind;
 [[gnu::cold, gnu::noinline]] void cilo__map_rehash(cilo_allocator *a, cilo_map *m, size_t esize, size_t ealign,
                                                    size_t ksize, cilo__key_kind kind);
 // a free slot for a key that is not in the map, its control byte set. the caller fills the entry.
-void *cilo__map_claim(cilo_map *m, uint64_t h, size_t esize);
+[[gnu::returns_nonnull]] void *cilo__map_claim(cilo_map *m, uint64_t h, size_t esize);
 bool cilo__map_erase(cilo_map *m, void *entry, size_t esize);
-void *cilo__map_next(const cilo_map *m, const void *entry, size_t esize);
+[[gnu::pure]] void *cilo__map_next(const cilo_map *m, const void *entry, size_t esize);
 void cilo__map_clear(cilo_map *m);
 void cilo__map_drop(cilo_allocator *a, cilo_map *m, size_t esize, size_t ealign);
 

@@ -209,7 +209,7 @@ static void heap_make_key(void) {
 #endif
 }
 
-[[gnu::noinline]] static cilo__heap *heap_create(void) {
+[[gnu::cold, gnu::noinline]] static cilo__heap *heap_create(void) {
   cilo__heap *h;
   pthread_once(&heap_key_once, heap_make_key);
   pthread_mutex_lock(&heaps_lock);

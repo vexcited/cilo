@@ -65,7 +65,7 @@ struct cilo_vtable {
 
 // called on out of memory and on size overflows, before aborting. it may exit or longjmp, never return.
 extern void (*cilo_oom_hook)(size_t size);
-[[noreturn]] void cilo_oom(size_t size);
+[[noreturn, gnu::cold]] void cilo_oom(size_t size);
 
 /* ========================================================================================================== */
 /* arenas.                                                                                                    */
@@ -136,7 +136,7 @@ static inline void *cilo_arena_alloc_zeroed(cilo_arena *a, size_t size, size_t a
   return p;
 }
 
-[[gnu::always_inline, gnu::returns_nonnull]]
+[[gnu::always_inline, gnu::malloc, gnu::returns_nonnull, gnu::alloc_size(2, 3), gnu::alloc_align(4)]]
 static inline void *cilo_arena_alloc_array(cilo_arena *a, size_t n, size_t size, size_t align) {
   size_t bytes;
   if (CILO_UNLIKELY(ckd_mul(&bytes, n, size))) cilo_oom(SIZE_MAX);
@@ -155,6 +155,7 @@ static inline void cilo_arena_free(cilo_arena *a, void *ptr, size_t size) {
 }
 
 // grows or shrinks in place when `ptr` is the last allocation, so a growing array at the top never copies.
+[[gnu::alloc_size(4)]]
 void *cilo_arena_realloc(cilo_arena *a, void *ptr, size_t old_size, size_t new_size, size_t align);
 
 // frees every allocation, keeping the chunks for the next ones.
@@ -194,7 +195,7 @@ typedef struct cilo_stats {
   size_t chunks;
   size_t spare;
 } cilo_stats;
-cilo_stats cilo_arena_stats(const cilo_arena *a);
+[[gnu::pure]] cilo_stats cilo_arena_stats(const cilo_arena *a);
 
 /* marks: everything allocated after a mark goes away at once. */
 
@@ -236,7 +237,7 @@ static inline void *cilo_alloc_zeroed(cilo_allocator *a, size_t size, size_t ali
   return memset(cilo_alloc(a, size, align), 0, size);
 }
 
-[[gnu::always_inline, gnu::returns_nonnull]]
+[[gnu::always_inline, gnu::returns_nonnull, gnu::alloc_size(2, 3), gnu::alloc_align(4)]]
 static inline void *cilo_alloc_array(cilo_allocator *a, size_t n, size_t size, size_t align) {
   size_t bytes;
   if (CILO_UNLIKELY(ckd_mul(&bytes, n, size))) cilo_oom(SIZE_MAX);
@@ -262,7 +263,7 @@ static inline char *cilo_strndup(cilo_allocator *a, const char *s, size_t len) {
 }
 static inline char *cilo_strdup(cilo_allocator *a, const char *s) { return cilo_strndup(a, s, strlen(s)); }
 // formats straight into the arena's free space when it fits, a single pass with no copy.
-[[gnu::format(printf, 2, 3)]] char *cilo_printf(cilo_allocator *a, const char *fmt, ...);
+[[gnu::format(printf, 2, 3), gnu::returns_nonnull]] char *cilo_printf(cilo_allocator *a, const char *fmt, ...);
 
 /* ========================================================================================================== */
 /* the general purpose heap: malloc and free, thread safe, with both fast paths inlined.                      */
@@ -346,7 +347,7 @@ typedef struct cilo__heap_head {
 
 [[gnu::cold, gnu::noinline, gnu::malloc, gnu::returns_nonnull]] void *cilo__malloc_slow(size_t size);
 [[gnu::noinline]] void cilo__mfree_slow(cilo__segment *seg, cilo__page *page, void *ptr);
-[[gnu::malloc, gnu::returns_nonnull]] void *cilo__calloc_large(size_t size);
+[[gnu::malloc, gnu::returns_nonnull, gnu::alloc_size(1)]] void *cilo__calloc_large(size_t size);
 
 // 8 byte steps up to 1 KiB, then eight classes per doubling, at most 6.25% lost to rounding.
 [[gnu::const]] static inline uint32_t cilo__bin_of(size_t size) {
@@ -374,13 +375,13 @@ extern _Atomic(size_t) cilo__heap_key;
 #endif
 
 #if CILO_ASAN
-[[gnu::malloc, gnu::alloc_size(1)]] static inline void *cilo_malloc(size_t size) {
+[[gnu::malloc, gnu::returns_nonnull, gnu::alloc_size(1)]] static inline void *cilo_malloc(size_t size) {
   void *p = malloc(size ? size : 1);
   if (!p) cilo_oom(size);
   return p;
 }
 static inline void cilo_mfree(void *ptr) { free(ptr); }
-static inline void *cilo_calloc(size_t n, size_t size) {
+[[gnu::malloc, gnu::returns_nonnull, gnu::alloc_size(1, 2)]] static inline void *cilo_calloc(size_t n, size_t size) {
   void *p = calloc(n ? n : 1, size ? size : 1);
   if (!p) cilo_oom(SIZE_MAX);
   return p;
@@ -419,7 +420,7 @@ static inline void *cilo_malloc(size_t size) {
   cilo__mfree_slow(seg, page, ptr);
 }
 
-[[gnu::always_inline, gnu::malloc, gnu::returns_nonnull]]
+[[gnu::always_inline, gnu::malloc, gnu::returns_nonnull, gnu::alloc_size(1, 2)]]
 static inline void *cilo_calloc(size_t n, size_t size) {
   size_t bytes;
   if (CILO_UNLIKELY(ckd_mul(&bytes, n, size))) cilo_oom(SIZE_MAX);
@@ -429,9 +430,10 @@ static inline void *cilo_calloc(size_t n, size_t size) {
 }
 #endif
 
-void *cilo_mrealloc(void *ptr, size_t size);
+[[gnu::returns_nonnull, gnu::alloc_size(2)]] void *cilo_mrealloc(void *ptr, size_t size);
 // any power of two alignment.
-[[gnu::malloc, gnu::returns_nonnull]] void *cilo_memalign(size_t align, size_t size);
+[[gnu::malloc, gnu::returns_nonnull, gnu::alloc_size(2), gnu::alloc_align(1)]]
+void *cilo_memalign(size_t align, size_t size);
 // how many bytes the block really holds, at least what was asked.
 size_t cilo_msize(const void *ptr);
 // returns the calling thread's cached empty segments and large blocks to the system.
@@ -452,12 +454,12 @@ extern const cilo_heap_allocator cilo__heap_allocator;
 static inline void *cilo_heap_alloc(cilo_heap_allocator *, size_t size, size_t align) {
   return align <= 16 ? cilo_malloc((size + align - 1) & ~(align - 1)) : cilo_memalign(align, size);
 }
-[[gnu::always_inline, gnu::returns_nonnull]]
+[[gnu::always_inline, gnu::malloc, gnu::returns_nonnull, gnu::alloc_size(2), gnu::alloc_align(3)]]
 static inline void *cilo_heap_alloc_zeroed(cilo_heap_allocator *h, size_t size, size_t align) {
   if (align <= 16) return cilo_calloc(1, (size + align - 1) & ~(align - 1));
   return memset(cilo_heap_alloc(h, size, align), 0, size);
 }
-[[gnu::always_inline, gnu::returns_nonnull]]
+[[gnu::always_inline, gnu::malloc, gnu::returns_nonnull, gnu::alloc_size(2, 3), gnu::alloc_align(4)]]
 static inline void *cilo_heap_alloc_array(cilo_heap_allocator *h, size_t n, size_t size, size_t align) {
   size_t bytes;
   if (CILO_UNLIKELY(ckd_mul(&bytes, n, size))) cilo_oom(SIZE_MAX);
