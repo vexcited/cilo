@@ -108,17 +108,23 @@ typedef struct cilo_arena {
 // pair, on every target.
 #define CILO__LOAD_ALONE(field) __atomic_load_n(&(field), __ATOMIC_RELAXED)
 
+// every allocation ends on an 8 byte boundary and chunks end on a 16 byte one, so `cur` is always 8 aligned. an
+// alignment up to 8 then needs no padding, and the next allocation waits on one add instead of four.
+#define CILO__ARENA_ROUND(size) (((size) + 7) & ~(size_t)7)
+
 [[gnu::always_inline, gnu::malloc, gnu::returns_nonnull, gnu::alloc_size(2), gnu::alloc_align(3)]]
 static inline void *cilo_arena_alloc(cilo_arena *a, size_t size, size_t align) {
   if (CILO_ASAN && align < 8) align = 8;
   uintptr_t end = (uintptr_t)CILO__LOAD_ALONE(a->end);
-  uintptr_t cur = (uintptr_t)a->cur;
+  char *at = (char *)__builtin_assume_aligned(a->cur, 8);
+  uintptr_t cur = (uintptr_t)at;
   size_t pad = (size_t)(-cur & (align - 1));
   size_t avail = (size_t)(end - cur);
-  // strict so an empty arena, where cur and end are null, always misses. no sum can overflow.
+  // strict so an empty arena, where cur and end are null, always misses. no sum can overflow, and the room left
+  // is a multiple of 8, so the rounded size fits too.
   if (CILO_LIKELY(pad + CILO__REDZONE < avail && size <= avail - pad - CILO__REDZONE)) {
-    char *p = a->cur + pad;
-    a->cur = p + size + CILO__REDZONE;
+    char *p = at + pad;
+    a->cur = p + CILO__ARENA_ROUND(size) + CILO__REDZONE;
     CILO__UNPOISON(p, size);
     return p;
   }
@@ -151,7 +157,7 @@ static inline void cilo__arena_lower(cilo_arena *a, char *to) {
 
 // gives the memory back when it is the last allocation, which makes stack like code free.
 static inline void cilo_arena_free(cilo_arena *a, void *ptr, size_t size) {
-  if (ptr && (char *)ptr + size + CILO__REDZONE == a->cur) cilo__arena_lower(a, ptr);
+  if (ptr && (char *)ptr + CILO__ARENA_ROUND(size) + CILO__REDZONE == a->cur) cilo__arena_lower(a, ptr);
 }
 
 // grows or shrinks in place when `ptr` is the last allocation, so a growing array at the top never copies.

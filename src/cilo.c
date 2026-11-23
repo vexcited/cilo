@@ -74,8 +74,8 @@ static cilo__chunk *chunk_new(cilo_arena *a, size_t bytes) {
   if (bytes < (map_from ? map_from : MAP_FROM)) {
     // a mapping costs two system calls and a whole page at least, small chunks are cheaper on the heap. a heap
     // block is 16 aligned from 16 bytes up, and whatever the size class adds is the chunk's too.
-    c = cilo_malloc((bytes + 15) & ~(size_t)15);
-    *c = (cilo__chunk){.size = cilo_msize(c), .kind = CILO__HEAP};
+    c = cilo_malloc(bytes);
+    *c = (cilo__chunk){.size = cilo_msize(c) & ~(size_t)15, .kind = CILO__HEAP};
     c->dirty = chunk_end(c);
     return c;
   }
@@ -167,6 +167,9 @@ void *cilo__arena_grow(cilo_arena *a, size_t size, size_t align) {
     if (bytes > MAX_STEP) bytes = MAX_STEP;
     if (bytes < min) bytes = min;
     if (bytes < need) bytes = need;
+    // a chunk ends on a 16 byte boundary, which keeps `cur` 8 aligned up to its end.
+    if (ckd_add(&bytes, bytes, 15)) cilo_oom(size);
+    bytes &= ~(size_t)15;
     if (!(c = chunk_new(a, bytes))) cilo_oom(size);
   }
   c->prev = a->chunk;
@@ -199,13 +202,14 @@ void cilo__rewind_slow(cilo_mark m) {
 void *cilo_arena_realloc(cilo_arena *a, void *ptr, size_t old_size, size_t new_size, size_t align) {
   if (!ptr) return new_size ? cilo_arena_alloc(a, new_size, align) : nullptr;
   char *p = ptr;
-  if (p + old_size + CILO__REDZONE == a->cur) {
+  if (p + CILO__ARENA_ROUND(old_size) + CILO__REDZONE == a->cur) {
     if (new_size <= old_size) {
-      cilo__arena_lower(a, p + new_size + CILO__REDZONE);
+      cilo__arena_lower(a, p + CILO__ARENA_ROUND(new_size) + CILO__REDZONE);
       return new_size ? p : (cilo__arena_lower(a, p), nullptr);
     }
-    if (new_size + CILO__REDZONE <= (size_t)(a->end - p)) {
-      a->cur = p + new_size + CILO__REDZONE;
+    // the room is a multiple of 8, so the rounded size fits whenever the size does.
+    if (new_size <= (size_t)(a->end - p) - CILO__REDZONE) {
+      a->cur = p + CILO__ARENA_ROUND(new_size) + CILO__REDZONE;
       CILO__UNPOISON(p, new_size);
       return p;
     }
@@ -247,7 +251,7 @@ cilo_arena cilo_arena_on(void *buf, size_t size, bool fixed) {
   cilo_arena a = {.fixed = fixed};
   if (size < lost + sizeof(cilo__chunk) + 16) return a;
   cilo__chunk *c = (cilo__chunk *)((char *)buf + lost);
-  *c = (cilo__chunk){.size = size - lost, .kind = CILO__BORROWED};
+  *c = (cilo__chunk){.size = (size - lost) & ~(size_t)15, .kind = CILO__BORROWED};
   c->dirty = chunk_end(c);
   chunk_enter(&a, c);
   return a;

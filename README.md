@@ -123,6 +123,7 @@ instead of in the blocks, which avoids that. Churn on Linux is within 2% of rpma
   because a load pair half covered by a pending store cannot take its value from the store buffer. On an M4 that
   is 2.65 ns per allocation against 1.31. `push` reads `items` and `cap` alone for the same reason, so `len` is
   never paired. x86_64 has no load pairs and compiles to the same two loads as before.
+- **An aligned cursor.** Every allocation ends on an 8 byte boundary, so `cur` is always 8 aligned and an alignment up to 8 needs no padding: the next allocation waits on one add instead of four. Allocating 16 B nodes went from 1.5 to 0.9 ns, at the price of rounding each allocation up to a multiple of 8 bytes.
 - **Small chunks from the heap.** A zeroed arena starts on a 4 KiB chunk from cilo's heap and doubles. From 64 KiB
   on, chunks are zeroed pages mapped from the system. Thousands of small arenas never make a system call and only
   hold what they use.

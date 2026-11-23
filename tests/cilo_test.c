@@ -331,6 +331,38 @@ static void generic_dispatch(void) {
   cilo_arena_drop(&arena);
 }
 
+static void arena_rounding(void) {
+  // odd sizes still leave the cursor 8 aligned, and the last allocation frees and grows in place.
+  cilo_arena arena = {};
+  bool aligned = true;
+  for (size_t size = 1; size < 100; size += 3) {
+    char *p = cilo_arena_alloc(&arena, size, 1);
+    memset(p, 'x', size);
+    aligned &= (uintptr_t)p % 8 == 0 && (uintptr_t)arena.cur % 8 == 0;
+  }
+  CHECK(aligned);
+  char *s = astrdup(&arena, "thirteen char");
+  char *mark = arena.cur;
+  char *grown = cilo_arena_realloc(&arena, s, 14, 29, 1);
+  CHECK(grown == s && strcmp(grown, "thirteen char") == 0 && (uintptr_t)arena.cur % 8 == 0);
+  CHECK(cilo_arena_realloc(&arena, grown, 29, 14, 1) == s && arena.cur == mark);
+  cilo_arena_free(&arena, s, 14);
+  CHECK(arena.cur == s);
+  cilo_arena_drop(&arena);
+
+  // a buffer of an odd size is used up to its last whole 16 bytes, never past its end.
+  char buf[1003];
+  cilo_arena on = CILO_ARENA_ON(buf);
+  bool inside = true;
+  for (int i = 0; i < 200; i++) {
+    char *p = cilo_arena_alloc(&on, 1, 1);
+    *p = 'y';
+    if (p >= buf && p < buf + sizeof buf) inside &= p + 8 <= buf + sizeof buf;
+  }
+  CHECK(inside && on.chunk->kind != CILO__BORROWED);
+  cilo_arena_drop(&on);
+}
+
 static void heap_basics(void) {
   // every size up to the large ones, each block written and checked, then freed in a scrambled order.
   enum { N = 4000 };
@@ -488,6 +520,7 @@ int main(void) {
   scratch_and_strings();
   generic_dispatch();
   arena_sources();
+  arena_rounding();
   maps();
   if (failures) return 1;
   puts("ok");
