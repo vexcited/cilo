@@ -14,6 +14,10 @@
 #include <sys/mman.h>
 #include <unistd.h>
 #define CILO__PAGES 1
+#elif defined(_WIN32)
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#define CILO__PAGES 1
 #else
 #define CILO__PAGES 0
 #endif
@@ -79,7 +83,16 @@ static cilo__chunk *chunk_new(cilo_arena *a, size_t bytes) {
     c->dirty = chunk_end(c);
     return c;
   }
-#if CILO__PAGES
+#if CILO__PAGES && defined(_WIN32)
+  SYSTEM_INFO info;
+  GetSystemInfo(&info);
+  size_t page = info.dwPageSize;
+  bytes = (bytes + page - 1) & ~(page - 1);
+  void *m = VirtualAlloc(nullptr, bytes, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+  if (!m) return nullptr;
+  c = m;
+  *c = (cilo__chunk){.size = bytes, .kind = CILO__MAPPED};
+#elif CILO__PAGES
   size_t page = (size_t)sysconf(_SC_PAGESIZE);
   bytes = (bytes + page - 1) & ~(page - 1);
   void *m = mmap(nullptr, bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
@@ -99,7 +112,9 @@ static void chunk_free(cilo_arena *a, cilo__chunk *c) {
   CILO__UNPOISON(c, c->size);
   switch (c->kind) {
   case CILO__MAPPED:
-#if CILO__PAGES
+#if CILO__PAGES && defined(_WIN32)
+    VirtualFree(c, 0, MEM_RELEASE);
+#elif CILO__PAGES
     munmap(c, c->size);
 #endif
     break;

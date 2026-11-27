@@ -6,6 +6,10 @@
 #include <unistd.h>
 #ifdef __APPLE__
 #include <mach/mach.h>
+#elif defined(_WIN32)
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#include <psapi.h>
 #endif
 
 typedef struct Node {
@@ -49,6 +53,9 @@ static size_t resident(void) {
   mach_msg_type_number_t count = MACH_TASK_BASIC_INFO_COUNT;
   task_info(mach_task_self(), MACH_TASK_BASIC_INFO, (task_info_t)&info, &count);
   return info.resident_size;
+#elif defined(_WIN32)
+  PROCESS_MEMORY_COUNTERS info = {.cb = sizeof info};
+  return GetProcessMemoryInfo(GetCurrentProcess(), &info, sizeof info) ? info.WorkingSetSize : 0;
 #else
   long pages = 0, rss = 0;
   FILE *f = fopen("/proc/self/statm", "r");

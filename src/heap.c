@@ -4,9 +4,15 @@
 #include <cilo/cilo.h>
 
 #include <pthread.h>
-#include <sys/mman.h>
 #include <time.h>
+
+#if defined(_WIN32)
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#else
+#include <sys/mman.h>
 #include <unistd.h>
+#endif
 
 #if CILO_ASAN
 #if defined(__APPLE__)
@@ -116,10 +122,30 @@ static pthread_once_t heap_key_once = PTHREAD_ONCE_INIT;
 static pthread_mutex_t heaps_lock = PTHREAD_MUTEX_INITIALIZER;
 static cilo__heap *free_heaps;
 
+#if defined(_WIN32)
+
+static void *os_map(size_t size) { return VirtualAlloc(nullptr, size, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE); }
+
+static void os_unmap(void *p, size_t) { VirtualFree(p, 0, MEM_RELEASE); }
+
+static size_t os_page(void) {
+  static size_t page;
+  if (!page) {
+    SYSTEM_INFO info;
+    GetSystemInfo(&info);
+    page = info.dwPageSize;
+  }
+  return page;
+}
+
+#else
+
 static void *os_map(size_t size) {
   void *p = mmap(nullptr, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
   return p == MAP_FAILED ? nullptr : p;
 }
+
+static void os_unmap(void *p, size_t size) { munmap(p, size); }
 
 static size_t os_page(void) {
   static size_t page;
@@ -127,11 +153,33 @@ static size_t os_page(void) {
   return page;
 }
 
+#endif
+
 static uintptr_t align_up(uintptr_t x, uintptr_t a) { return (x + a - 1) & ~(a - 1); }
 
 // a mapping aligned to the segment size. the hint right after the previous segment is usually aligned already,
 // which saves the two trims.
 static _Atomic(uintptr_t) map_hint;
+
+#if defined(_WIN32)
+
+// windows frees a mapping only whole, so an aligned one is found by reserving more, letting go of it and
+// mapping the aligned part alone, again when another thread took the room meanwhile.
+static void *os_map_segment(size_t size) {
+  uintptr_t hint = atomic_load_explicit(&map_hint, memory_order_relaxed);
+  void *p = hint ? VirtualAlloc((void *)hint, size, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE) : nullptr;
+  for (int tries = 0; !p && tries < 64; tries++) {
+    char *m = VirtualAlloc(nullptr, size + CILO__SEG_SIZE, MEM_RESERVE, PAGE_NOACCESS);
+    if (!m) return nullptr;
+    VirtualFree(m, 0, MEM_RELEASE);
+    p = VirtualAlloc((void *)align_up((uintptr_t)m, CILO__SEG_SIZE), size, MEM_RESERVE | MEM_COMMIT,
+                     PAGE_READWRITE);
+  }
+  if (p) atomic_store_explicit(&map_hint, (uintptr_t)p + align_up(size, CILO__SEG_SIZE), memory_order_relaxed);
+  return p;
+}
+
+#else
 
 static void *os_map_segment(size_t size) {
   uintptr_t hint = atomic_load_explicit(&map_hint, memory_order_relaxed);
@@ -156,6 +204,8 @@ static void *os_map_segment(size_t size) {
   return start;
 }
 
+#endif
+
 static cilo__heap *heap_peek(void) { return (cilo__heap *)cilo__heap_get(); }
 
 static void heap_set(cilo__heap *h) {
@@ -167,7 +217,7 @@ static void heap_set(cilo__heap *h) {
 
 static char *segment_base(const cilo__segment *seg) { return (char *)((uintptr_t)seg & ~(CILO__SEG_SIZE - 1)); }
 
-static void segment_unmap(cilo__segment *seg) { munmap(segment_base(seg), seg->size); }
+static void segment_unmap(cilo__segment *seg) { os_unmap(segment_base(seg), seg->size); }
 
 static void heap_flush(cilo__heap *h) {
   for (cilo__segment *s = h->spare, *next; s; s = next) {
@@ -368,6 +418,8 @@ static cilo__segment *segment_new(cilo__heap *h, uint8_t kind) {
 static uint64_t now_ns(void) {
 #if defined(__APPLE__)
   return clock_gettime_nsec_np(CLOCK_UPTIME_RAW_APPROX);
+#elif defined(_WIN32)
+  return GetTickCount64() * 1'000'000u;
 #else
   struct timespec ts;
   clock_gettime(CLOCK_MONOTONIC_COARSE, &ts);
